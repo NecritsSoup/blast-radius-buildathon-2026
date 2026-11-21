@@ -5,17 +5,18 @@ Test selection for sqlglot at pinned commit
 
 ## Submission build
 
-The coverage map is generated **offline** and checked in as `coverage-map.json`.
-The Docker image copies `selector.py`, `semantic.py` and that map into the pinned
-Python 3.13 image. It does not clone source, install dependencies or run tests.
+The coverage map is generated **offline** and checked in as `coverage-map.json`
+(`build_map.py`, then `augment_map.py` for class-constant readers). The image
+installs the test dependencies pinned by the organisers' `requirements.lock`,
+fetches sqlglot at the pinned commit from GitHub (content checked against a
+tree digest in `fetch_sqlglot.py`) and precompiles it. No tests run during the
+build. If the fetch fails, the build still succeeds and the selector runs
+without run-time verification.
 
-The first submission timed out because its Dockerfile performed collection during
-the image build. That build stage has been removed. Committed maps generated from
-the pristine pinned version are allowed by the competition rules.
-
-The map contains source, class/fixture dependencies, operand-domain observations,
-its pinned source revision, and the upstream source license. It contains no event
-patches, mutation outcomes, sample answers or mutation-kind answer tables.
+The map contains source, class/fixture dependencies, class-constant reader
+sets, operand-domain observations, its pinned source revision and the upstream
+license. It contains no event patches, mutation outcomes, sample answers or
+answer tables keyed by patch or edit kind.
 
 ## Local validation
 
@@ -23,19 +24,29 @@ patches, mutation outcomes, sample answers or mutation-kind answer tables.
 | --- | ---: | ---: |
 | Official starter | 1614.1 | 0 |
 | Statement blocks plus class dependencies | 178.737 | 0 |
-| Above plus operand-domain equivalence (default) | 128.496 | 0 |
+| Above plus operand-domain equivalence (practice submission, 225.4 s on the board) | 128.496 | 0 |
+| Above plus class-constant reader narrowing | 120.120 | 0 |
+| Above plus run-time verification (default) | 109.749 | 0 |
 
-All 30 public sample commits pass. The standalone, dependency-free runtime was
-also checked with Python 3.13.18 on macOS/arm64, using only the three copied files:
-128.496 simulated seconds, zero misses. All 42 selector/equivalence regression
-tests pass on Python 3.13. The actual Linux Docker image has not been run locally.
-The leaderboard uses hidden commits, so these results do not establish a ranking.
+Linux image (`linux/amd64` under Rosetta via Colima), built from scratch in
+40 s and run three times with the scorer's exact `docker run` flags: 109.749 s
+simulated, 0 misses, 4.8 s container CPU each run (cgroup `cpu.stat`). For
+comparison the practice submission's image used 0.69 s on the sample in the same
+setup (1.23 s on the board's hidden batch).
 
-Offline collection used the pristine pinned source: 1,621 tests and 25,454
-subtests passed. Fresh mutation checks caught all failures in a combined change
-and three independent complete-suite checks. A harmful identity-to-equality
-change was also checked on a targeted existing test; that test failed and remained
-selected. These are development checks, not guarantees for every hidden change.
+`measure_cpu.py` stores each pristine test's in-process CPU and each class's
+setup CPU in the map. Tests that use process pools, or classes with costly
+setup, cost several times their recorded duration when run in one process, so
+the verifier's go/no-go estimate uses the measured figures.
+
+Mutation checks against real pytest (spawned pools, files on disk):
+- `validate_verify.py`: 60 random single-expression mutants in covered
+  functions where the verifier runs: 0 verifier misses, 8 all-pass commits
+  emptied.
+- `validate_constants.py`: random value changes to narrowable class constants.
+  The first round (40 mutants) missed 6, all `Dialects` enum members. Enum,
+  dataclass and namedtuple members are now never narrowed. A fresh round with
+  another seed: 0 misses in 50 mutants, 42 of which broke at least one test.
 
 ## Method
 
@@ -57,6 +68,31 @@ This is a dynamic argument over pristine observations, not a proof for all input
 Unobserved dependencies/types, global state, source introspection and platform
 or instrumentation differences remain limitations. The checked-in map was collected
 on macOS with Python 3.14 and the selector was separately tested on Python 3.13.
+
+
+### Class constants
+
+An edit to an UPPER_CASE class constant used to select every test that
+instantiated the class. `augment_map.py` records, from the pristine source and
+coverage, which statements read each constant (attribute loads, bare names and
+string literals such as `getattr`/`__dict__` keys) and which tests executed
+them. When a class differs only in such assignments, the selector picks those
+readers. It falls back to class consumers when any read of the name runs at
+import time (metaclasses, class bodies, derived tables), when the class also
+changed elsewhere, or when a new value uses a name or attribute path that does
+not already appear in the file.
+
+### Run-time verification (`verify.py`)
+
+For Python-only patches whose static selection is cheap relative to its
+schedule cost, a forked child serves the patched files from memory, replaces
+process pools with an in-process pickling executor so pool work sees the
+patch, and runs the candidate tests with unittest, cheapest first, stopping at
+the first failure. Tests that explicitly pass are dropped; failures, errors,
+unexpected successes, import errors, crashes and timeouts keep the static
+selection. Tests that read source text, patch imports or start a fresh
+interpreter are never dropped. A 95 s wall budget keeps the batch within the
+run limit, and numeric libraries are single-threaded because CPU is charged.
 
 ## Reproduce
 

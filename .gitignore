@@ -1,0 +1,11 @@
+sample/
+output.jsonl
+__pycache__/
+
+work/
+*.log
+
+output-*.jsonl
+
+# local container runs
+*.err

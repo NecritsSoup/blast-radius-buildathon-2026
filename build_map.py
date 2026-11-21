@@ -181,6 +181,7 @@ def main():
                            'comparisons': {site: sorted(pairs) for site, pairs in comparisons.sites.get(relative, {}).items()}}
     result = {'version': 2, 'commit': 'eb11aec4be8cb2122afe713a4816662c3f0fb2fa',
               'python': sys.version, 'coverage': coverage.__version__, 'tests': tests,
+              'source_license': (root / 'LICENSE').read_text(),
               'sets': pool, 'files': files, 'operand_types': comparisons.types,
               'fixtures': {name: intern(contexts) for name, contexts in sorted(fixtures.items())}}
     output.write_text(json.dumps(result, separators=(',', ':')))

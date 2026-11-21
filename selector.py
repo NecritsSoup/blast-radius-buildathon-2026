@@ -1,8 +1,10 @@
 """Coverage-based selection; no sample answers are used at runtime or build time."""
 import ast
+import builtins
 import json
 import os
 import re
+import sys
 from pathlib import Path
 from semantic import equivalent_operator_edits
 
@@ -110,6 +112,98 @@ def class_consumers(info, number, pools):
     return pools[scope[3]]
 
 
+UPPER = re.compile(r'^[A-Z][A-Z0-9_]*$')
+
+
+def find_class(tree, qualname):
+    """Locate a class by the qualified name structure.class_scopes records."""
+    def visit(node, prefix):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.ClassDef):
+                name = prefix + child.name
+                if name == qualname:
+                    yield child
+                yield from visit(child, name + '.')
+            elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                yield from visit(child, prefix + child.name + '.<locals>.')
+            else:
+                yield from visit(child, prefix)
+    found = list(visit(tree, ''))
+    return found[0] if len(found) == 1 else None
+
+
+def class_layout(node):
+    """Split a class body into simple constant assignments and everything else."""
+    head = [ast.dump(part) for part in node.decorator_list + node.bases + node.keywords]
+    constants, other = {}, []
+    for stmt in node.body:
+        target = None
+        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
+            target = stmt.targets[0]
+        elif isinstance(stmt, ast.AnnAssign) and stmt.value is not None:
+            target = stmt.target
+        if isinstance(target, ast.Name) and UPPER.match(target.id):
+            if target.id in constants:
+                return None
+            constants[target.id] = stmt
+        else:
+            other.append(ast.dump(stmt))
+    return node.name, head, other, constants
+
+
+def loaded_paths(node):
+    paths = set()
+    for leaf in ast.walk(node):
+        if isinstance(leaf, (ast.Name, ast.Attribute)):
+            try:
+                paths.add(ast.unparse(leaf))
+            except (ValueError, TypeError, AttributeError, RecursionError):
+                return None
+    return paths
+
+
+def constant_readers(before, after, qualname, mapping):
+    """Tests reading the class constants a patch changes, or None when unsure.
+
+    Only applies when the class differs solely in UPPER_CASE single-name
+    assignments whose names are read exclusively from function code at run time
+    (recorded offline from pristine coverage). New values may only use names and
+    attribute paths that already appear in the pristine file, so the class body
+    still evaluates at import.
+    """
+    readers, unsafe = mapping.get('attr_readers'), mapping.get('attr_unsafe')
+    if readers is None or unsafe is None:
+        return None
+    old, new = find_class(before, qualname), find_class(after, qualname)
+    if old is None or new is None:
+        return None
+    old_layout, new_layout = class_layout(old), class_layout(new)
+    if old_layout is None or new_layout is None or old_layout[:3] != new_layout[:3]:
+        return None
+    old_constants, new_constants = old_layout[3], new_layout[3]
+    changed = {name for name in set(old_constants) | set(new_constants)
+               if name not in old_constants or name not in new_constants
+               or ast.dump(old_constants[name]) != ast.dump(new_constants[name])}
+    known = loaded_paths(before)
+    if known is None:
+        return None
+    known |= set(dir(builtins))
+    tests = set()
+    unsafe = set(unsafe)
+    for name in changed:
+        if name in unsafe or name not in readers:
+            return None
+        if name in new_constants:
+            stmt = new_constants[name]
+            used = loaded_paths(stmt.value) if stmt.value is not None else set()
+            if stmt.__class__ is ast.AnnAssign:
+                used = (used or set()) | (loaded_paths(stmt.annotation) or set())
+            if used is None or not used <= known | {name}:
+                return None
+        tests.update(mapping['sets'][readers[name]])
+    return tests
+
+
 def select(patch, tests, mapping, mode='block'):
     affected = changes(patch)
     if not affected or mapping is None:
@@ -122,7 +216,7 @@ def select(patch, tests, mapping, mode='block'):
     known_tests = set(mapped_tests)
     if any(t['id'] not in known_tests for t in tests):
         return tests
-    parsed = {}
+    parsed, trees = {}, {}
     all_equivalent = bool(mapping.get('operand_types')) and os.environ.get('SELECT_PROOFS', '1') == '1'
     for path, lines in affected.items():
         source = files.get(path, {}).get('source')
@@ -142,6 +236,7 @@ def select(patch, tests, mapping, mode='block'):
             return tests
         unchanged = ast.dump(before) == ast.dump(after)
         parsed[path] = unchanged
+        trees[path] = (before, after)
         if all_equivalent and not unchanged:
             all_equivalent = equivalent_operator_edits(before, after,
                                files[path].get('comparisons', {}), mapping['operand_types'])
@@ -165,9 +260,17 @@ def select(patch, tests, mapping, mode='block'):
         for number in lines:
             functions = [s for s in info['spans'] if s[0] <= number <= s[1]]
             if not functions:
-                contexts = class_consumers(info, number, pools)
-                if not contexts:
-                    return tests
+                scopes = [c for c in info.get('classes', []) if c[0] <= number <= c[1]]
+                narrowed = None
+                if scopes and path in trees:
+                    scope = min(scopes, key=lambda c: c[1] - c[0])
+                    narrowed = constant_readers(*trees[path], scope[2], mapping)
+                if narrowed is not None:
+                    contexts = narrowed
+                else:
+                    contexts = class_consumers(info, number, pools)
+                    if not contexts:
+                        return tests
             else:
                 start, end = min(functions, key=lambda s: s[1] - s[0])
                 if mode == 'block':
@@ -190,14 +293,56 @@ def select(patch, tests, mapping, mode='block'):
     return [t for t in tests if t['id'] in ids]
 
 
+def overlay(patch, root):
+    """Patched sources for every changed file, or None when any cannot be built."""
+    patched = {}
+    for path in changes(patch):
+        original = root / path
+        if not original.is_file():
+            return None
+        replacement = patched_source(patch, path, original.read_text())
+        if not replacement:
+            return None
+        patched[path] = replacement
+    return patched or None
+
+
 def main():
     data = Path(os.environ.get('DATA_DIR', '/data'))
     tests = json.loads((data / 'tests.json').read_text())['tests']
     map_path = Path(__file__).with_name('coverage-map.json')
     mapping = json.loads(map_path.read_text()) if map_path.exists() else None
-    for patch in sorted((data / 'commits').glob('*.patch')):
-        selected = select(patch.read_text(), tests, mapping, os.environ.get('SELECT_MODE', 'block'))
-        print(json.dumps({'commit': patch.stem, 'workers': split(selected)}, separators=(',', ':')))
+    mode = os.environ.get('SELECT_MODE', 'block')
+    results, jobs = {}, []
+    root = Path(os.environ.get('SQLGLOT_ROOT', '/app/sqlglot'))
+    verify_on = os.environ.get('VERIFY', '1') == '1' and (root / 'sqlglot').is_dir()
+    for patch_path in sorted((data / 'commits').glob('*.patch')):
+        patch = patch_path.read_text()
+        selected = select(patch, tests, mapping, mode)
+        results[patch_path.stem] = selected
+        if verify_on and selected and len(selected) < len(tests):
+            try:
+                import verify
+                if verify.eligible(changes(patch), selected):
+                    patched = overlay(patch, root)
+                    if patched:
+                        jobs.append((patch_path.stem, patched, selected))
+            except Exception as error:  # never let the check cost an answer
+                print(f'verify setup failed for {patch_path.stem}: {error!r}', file=sys.stderr)
+    if jobs:
+        try:
+            import verify
+            costs = None
+            if mapping and mapping.get('test_cpu'):
+                costs = {'test': {test: cpu for test, cpu in zip(mapping['tests'], mapping['test_cpu']) if cpu},
+                         'class': mapping.get('class_cpu', {})}
+            refined = verify.refine(jobs, str(root), split, log=lambda m: print(m, file=sys.stderr), costs=costs)
+            results.update(refined)
+        except Exception as error:
+            print(f'verify failed: {error!r}', file=sys.stderr)
+    for commit, selected in results.items():
+        print(json.dumps({'commit': commit, 'workers': split(selected)}, separators=(',', ':')))
+    sys.stdout.flush()
 
 
 if __name__ == '__main__':
