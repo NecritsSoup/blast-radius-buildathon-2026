@@ -63,6 +63,13 @@ class ConstantTests(unittest.TestCase):
         self.assertIn('WEEK_OFFSET = 2', new)
         self.assertEqual([t['id'] for t in select(patch, self.tests, self.mapping)], ['t0'])
 
+    def test_readers_outside_class_consumers_are_dropped(self):
+        self.mapping['files']['sqlglot/d.py']['classes'] = [[4, 10, 'Dialect', 1]]
+        self.mapping['attr_readers']['WEEK_OFFSET'] = 2
+        patch = ('diff --git a/sqlglot/d.py b/sqlglot/d.py\n--- a/sqlglot/d.py\n+++ b/sqlglot/d.py\n'
+                 '@@ -5 +5 @@\n-    WEEK_OFFSET = 0\n+    WEEK_OFFSET = 2\n')
+        self.assertEqual([t['id'] for t in select(patch, self.tests, self.mapping)], ['t1'])
+
     def test_select_unsafe_uses_class_consumers(self):
         patch = ('diff --git a/sqlglot/d.py b/sqlglot/d.py\n--- a/sqlglot/d.py\n+++ b/sqlglot/d.py\n'
                  '@@ -6 +6 @@\n-    ESCAPES = {"x": 1}\n+    ESCAPES = {"x": 2}\n')

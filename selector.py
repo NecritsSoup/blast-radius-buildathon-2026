@@ -265,12 +265,13 @@ def select(patch, tests, mapping, mode='block'):
                 if scopes and path in trees:
                     scope = min(scopes, key=lambda c: c[1] - c[0])
                     narrowed = constant_readers(*trees[path], scope[2], mapping)
+                contexts = class_consumers(info, number, pools)
+                if not contexts:
+                    return tests
                 if narrowed is not None:
-                    contexts = narrowed
-                else:
-                    contexts = class_consumers(info, number, pools)
-                    if not contexts:
-                        return tests
+                    # Readers are recorded by name across every class, so keep
+                    # only those that also use this class: never wider than before.
+                    contexts = set(contexts) & narrowed
             else:
                 start, end = min(functions, key=lambda s: s[1] - s[0])
                 if mode == 'block':
