@@ -1,136 +1,93 @@
 # Blast Radius
 
-A coverage- and operand-domain-based test selector for sqlglot at pinned commit
+Test selection for sqlglot at pinned commit
 `eb11aec4be8cb2122afe713a4816662c3f0fb2fa`.
 
-## Local results
+## Submission build
+
+The coverage map is generated **offline** and checked in as `coverage-map.json`.
+The Docker image copies `selector.py`, `semantic.py` and that map into the pinned
+Python 3.13 image. It does not clone source, install dependencies or run tests.
+
+The first submission timed out because its Dockerfile performed collection during
+the image build. That build stage has been removed. Committed maps generated from
+the pristine pinned version are allowed by the competition rules.
+
+The map contains source, class/fixture dependencies, operand-domain observations,
+its pinned source revision, and the upstream source license. It contains no event
+patches, mutation outcomes, sample answers or mutation-kind answer tables.
+
+## Local validation
 
 | Variant | Simulated seconds | Missed sample commits |
 | --- | ---: | ---: |
 | Official starter | 1614.1 | 0 |
-| Full-suite optimized scheduling | 1104.510 | 0 |
 | Statement blocks plus class dependencies | 178.737 | 0 |
 | Above plus operand-domain equivalence (default) | 128.496 | 0 |
 
-The current candidate reduces sample simulated cost by approximately 92.0%
-against the starter and 28.1% against the previous 178.737-second candidate.
-Local selection CPU is approximately 0.23 seconds, excluding map loading and
-interpreter startup. Container CPU is charged separately by the official scorer.
-These results cover all 30 public sample commits. The leaderboard uses hidden
-commits, so this result does not establish our ranking.
+All 30 public sample commits pass. The standalone, dependency-free runtime was
+also checked with Python 3.13.18 on macOS/arm64, using only the three copied files:
+128.496 simulated seconds, zero misses. All 42 selector/equivalence regression
+tests pass on Python 3.13. The actual Linux Docker image has not been run locally.
+The leaderboard uses hidden commits, so these results do not establish a ranking.
 
-Validated on macOS/arm64 with Python 3.14:
-- 1,621 pristine sqlglot tests and 25,454 subtests pass under the collector.
-- 42 selector and equivalence regression tests pass.
-- A fresh four-change patch produced seven failing competition tests, all selected.
-- Three of those changes were checked independently against the complete suite:
-  selections of 1, 16 and 143 tests caught all 1, 2 and 3 failures respectively.
-- The new collector preserves exactly the previous line, class and fixture test
-  footprints, so those independent selection checks remain applicable.
-- A fresh harmful identity-to-equality edit was checked on its targeted existing
-  test: the selector retained that test and the test failed as expected.
-- The latest native collection completed in 184 seconds; the map is 7.8 MB.
+Offline collection used the pristine pinned source: 1,621 tests and 25,454
+subtests passed. Fresh mutation checks caught all failures in a combined change
+and three independent complete-suite checks. A harmful identity-to-equality
+change was also checked on a targeted existing test; that test failed and remained
+selected. These are development checks, not guarantees for every hidden change.
 
-The Linux/amd64 Docker image with Python 3.13 remains unverified. No repository
-has been published and no leaderboard submission has been made.
+## Method
 
-## Collection
+Body changes select consumers of enclosing statement blocks, including complete
+multi-line guards. Class settings use class-consumer maps; fixture changes use
+reader maps. Unknown dependencies, mismatched patch context and invalid Python
+syntax fall back to all tests. Worker balancing evaluates 1–8 workers with startup
+costs in integer milliseconds.
 
-The build collects per-test source coverage, fixture reads, shared setup/teardown
-contexts, class usage including inheritance, and operand domains at identity
-comparisons. Original constructors and dialect lookup methods are wrapped to
-observe class usage. Pool tasks run serially under the caller's context with
-pickle copies across input/output boundaries, exposing work otherwise hidden
-in subprocesses. The C coverage tracer is selected for dynamic-context support.
+A whole patch can be skipped when every changed file has an identical AST or
+only operator substitutions that agree across its recorded operand domains.
+The latter accepts default identity-equality objects and the same canonical
+string/integer Enum domain with unique raw values. Custom equality, mixed domains,
+synthetic Enum values, NaN and unobserved sites are rejected. Other edits in the
+patch prevent this shortcut. `SELECT_PROOFS=0` disables operand-based equivalence;
+`SELECT_MODE=function` selects broader function scopes.
 
-Identity expressions are instrumented through an import hook to observe operand
-types before performing the original operation. The checkout is unchanged.
-Custom equality slots remain opaque to equivalence checks; slot and class
-identities are retained so replaced descriptors and duplicate class names stay
-separate. Unsupported domains are cached conservatively to reduce overhead.
-A pristine-suite failure rejects the map. Collection never reads event patches,
-sample answers, mutation results or mutation-kind labels.
-
-## Selection
-
-Body changes select consumers of the enclosing statement block, including the
-complete guard of a multi-line condition. Unreached blocks need no tests. Class
-settings select class consumers; fixture edits select fixture readers. Unknown
-dependencies, mismatched patch context and invalid Python syntax fall back to
-all tests. Identical complete-file ASTs, including docstrings and type comments,
-can be skipped.
-
-For operator edits, the selector additionally checks the complete changed ASTs
-against the collected operand domains. It accepts only identity/value-equality
-substitutions that agree for default identity-equality objects or the same
-canonical string/integer Enum domain with unique raw values. It rejects custom
-equality/negation, mixed Enum/string domains, synthetic Enum values, NaN and
-unobserved sites. Every changed file must be AST-identical or equivalently
-changed before this rule can skip a patch. Additional body or fixture changes
-prevent that shortcut. No patch-specific or mutation-kind answer tables exist.
-
-This is a dynamic argument over recorded executions, not a guarantee for every
-possible input. Source introspection, unobserved paths/types, global cache state,
-instrumentation differences and unseen dependencies may still cause hidden
-misses. Passing local checks is not proof of a hidden-data score.
-
-Worker balancing evaluates 1–8 workers in integer milliseconds, including startup
-overhead. `SELECT_PROOFS=0` disables operand-based equivalence. `SELECT_MODE=function`
-uses broader function scopes. Experimental line mode remains a development option
-and is not recommended: it missed a sample failure.
+This is a dynamic argument over pristine observations, not a proof for all inputs.
+Unobserved dependencies/types, global state, source introspection and platform
+or instrumentation differences remain limitations. The checked-in map was collected
+on macOS with Python 3.14 and the selector was separately tested on Python 3.13.
 
 ## Reproduce
 
-With Docker:
-
 ```sh
 make sample
-```
-
-Docker builds from the pinned source with the supplied dependency lock,
-collects a Linux map and runs under competition limits. The build has a ten-minute
-budget. The complete Linux build, including dependencies, remains unmeasured.
-
-Using the local map:
-
-```sh
 python3 -m unittest -v test_selector test_semantic
 python3 evaluate.py
 SELECT_PROOFS=0 python3 evaluate.py
 ```
 
-Collect a new map with the required dependencies installed:
+`make sample` builds the small runtime image and scores it on a local sample set.
+The dataset is mounted at run time and is not committed.
+
+To regenerate the map OFFLINE in an environment with the test dependencies:
 
 ```sh
 PYTHONPATH=/path/to/sqlglot python build_map.py --source /path/to/sqlglot --output coverage-map.json
 ```
 
-The source must be the pinned commit; Docker enforces the pin. Fresh mutation
-checks require the test environment's Python and a pristine `work/sqlglot` checkout:
+Use the pinned source revision and `requirements.lock`, plus `coverage==7.17.4`.
+Review the regenerated map and validate it before committing it. The collector
+wraps constructors and dialect lookup, records identity-comparison operand types
+through an import hook, and runs pool tasks serially with pickle copies so their
+coverage stays in the correct context. A pristine-suite failure rejects the map.
 
-```sh
-python validate_mutations.py
-python validate_mutations.py --individual
-python validate_identity.py --map coverage-map.json --path sqlglot/expressions/core.py --line 838 --column 15 --test tests/test_expressions.py::TestExprs::test_eq_on_same_instance_short_circuits
-```
-
-The second command requires outputs from the first. The last command is a
-TARGETED harmful-comparison check, not a full mutated-suite run. All checks create
-isolated working copies. No mutation result enters the image or selection map.
-
-Sample answers are used only by the supplied local scorer. The source checkout,
-sample data, maps, logs and generated outputs are ignored by Git. The image builds
-its own map, independent of the local macOS map.
-
-## Research
-
-The general block-dependency approach was reviewed against
-[pytest-testmon's explanation](https://www.testmon.org/blog/determining-affected-tests/)
-and its [public repository](https://github.com/tarpas/pytest-testmon).
-No testmon source was copied and no other team's competition implementation was used.
+The general dependency-block approach was reviewed against
+[pytest-testmon](https://www.testmon.org/blog/determining-affected-tests/).
+No testmon source or another team's implementation was copied.
 
 ## Submission
 
-Before submitting, validate the Linux image. Publish this directory as a public
-repository with Dockerfile at the root, then submit its commit hash. Keep submitted
-commits and the public repository available until results are published.
+Keep `Dockerfile`, `selector.py`, `semantic.py` and `coverage-map.json` at the root
+of the public repository. Submit the NEW commit containing the corrected Dockerfile
+and map. Keep the repository and submitted commits available through results.
